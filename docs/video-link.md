@@ -2,14 +2,12 @@
 
 The transport carries **sampled composite video**, not RGB pixels and not raw RF I/Q.
 
-That boundary is important:
-
 ```text
 C5                                            S3
-RF -> I/Q -> WBFM -> filter -> CVBS samples   -> PAL/NTSC -> RGB -> LCD
+RF -> I/Q -> WBFM -> filter -> CVBS samples   -> PAL/NTSC -> RGB -> 40-pin LCD
 ```
 
-Sending raw I/Q would move the hardest RF DSP onto the S3 and require much more bandwidth. Sending RGB would force the C5 to decode video and build frames. Sampled CVBS is the useful middle point.
+The S3 target is specifically the Waveshare ESP32-S3-LCD-Driver-Board with its 40-pin 3SPI+RGB connector. That exact board's GPIO budget determines the transport pinout.
 
 ## Payload target
 
@@ -18,11 +16,13 @@ Initial stream format:
 | Field | Value |
 |---|---|
 | sample | unsigned 8-bit |
-| nominal black/sync/white mapping | calibrated by C5 producer; exact levels carried in metadata if needed |
 | initial rate | 10 MS/s |
 | stretch target | 13.5 MS/s |
-| byte order | one temporal sample per byte |
-| compression | none |
+| transport | 4-data-line SPI / QSPI |
+| C5 role | slave / producer |
+| S3 role | master / consumer |
+| buffering | DMA ping-pong/ring buffers |
+| compression | none initially |
 
 Bandwidth:
 
@@ -31,34 +31,56 @@ Bandwidth:
 13.5 MS/s * 8 = 108 Mbit/s
 ```
 
-A 4-data-line 40 MHz bus has 160 Mbit/s raw capacity. That is enough on paper for 13.5 MS/s but the useful sustained rate must be measured with the actual ESP32-C5 slave, ESP32-S3 master, GPIO routing, DMA descriptors and transaction overhead.
+A 4-data-line 40 MHz bus has 160 Mbit/s raw capacity. The real sustained rate must be measured with the chosen C5 GPIO routing and the exact S3 board because the S3 candidate mapping deliberately reuses LCD-init and USB pins.
 
-**Do not lock 13.5 MS/s into the product until the sustained-throughput test passes with margin.** PAL/NTSC reconstruction can start at 10 MS/s and move upward after the transport and decoder are stable.
+## Exact S3 candidate pinout
 
-## Electrical bus
+After the 40-pin RGB panel has been initialized:
 
-Preferred development bus:
+| QSPI signal | S3 GPIO | Existing board connection |
+|---|---:|---|
+| SCLK | 6 | unused by 40-pin RGB path |
+| CS | 16 | touch INT; touch held in reset |
+| IO0 | 1 | LCD serial-init SDA |
+| IO1 | 2 | LCD serial-init SCK |
+| IO2 | 19 | native USB D- |
+| IO3 | 20 | native USB D+ |
+
+CRSF remains on GPIO43/44. Battery sensing remains on GPIO4. The TCA9554 stays on GPIO7/15.
+
+The required boot/runtime sequence is documented in [`waveshare-40pin-target.md`](waveshare-40pin-target.md).
+
+### Why GPIO1/2 can potentially be reused
+
+The ST7701-style RGB panel only needs its 3-wire serial interface for initialization/configuration; continuous pixels use the parallel RGB bus. The S3 initializes the panel using GPIO1/2 with LCD CS on GPIO42, then keeps GPIO42 high before remapping GPIO1/2 into the C5 transport.
+
+The panel still physically sees activity on those two wires, so this is only safe if it truly ignores them while CS is inactive. That is a hardware-validation item.
+
+### Why USB cannot stay connected
+
+GPIO19/20 are the S3's native USB D-/D+ on this board. They become two QSPI data lines in the proposed runtime mapping. Therefore native USB is a **bring-up/flash interface**, not an interface that can remain active while full-QSPI video is running.
+
+The USB-C connector and routing remain attached electrically, so the resulting stubs are part of the signal-integrity test.
+
+## No READY wire on the exact board
+
+The generic design originally reserved a separate producer-ready GPIO. The exact Waveshare 40-pin target does not have a comfortable spare direct pin after RGB, QSPI, CRSF and battery functions are allocated.
+
+The prototype therefore uses **polling / fixed-cadence master reads** instead:
 
 ```text
-S3 (master)                         C5 (slave)
------------                         ----------
-SCLK       -----------------------> SCLK
-CS         -----------------------> CS
-IO0        <----------------------> IO0
-IO1        <----------------------> IO1
-IO2        <----------------------> IO2
-IO3        <----------------------> IO3
-READY      <----------------------- READY / block queued
-GND        ------------------------ GND
+C5 slave:
+    keep next DMA block queued
+    update sequence/discontinuity counters
+
+S3 master:
+    issue the next fixed-size read on schedule
+    validate the returned block header
 ```
 
-The video phase is overwhelmingly C5 -> S3. Bidirectional IO lines are retained so the same physical bus can support short control/status transactions without another high-speed serial interface.
-
-The READY line is recommended for prototype bring-up because an SPI slave cannot create clock edges. It tells the S3 that the C5 has a DMA block ready to be clocked out.
+If the producer has discontinuous data, the block header says so. No unbounded queue is allowed.
 
 ## Block transport
-
-The stream is continuous logically, but moved as bounded DMA blocks physically.
 
 Recommended first block size:
 
@@ -68,8 +90,6 @@ Recommended first block size:
 
 At 13.5 MS/s one block spans about 303 us. At 10 MS/s it spans about 410 us.
 
-Large enough blocks reduce per-transaction overhead while remaining short enough to keep FIFO/latency diagnostics useful.
-
 ### Header v0
 
 Each transfer begins with a compact fixed header followed by raw samples:
@@ -77,7 +97,7 @@ Each transfer begins with a compact fixed header followed by raw samples:
 ```text
 byte 0      0xC5
 byte 1      0x56                 # 'V'
-byte 2      protocol version     # 0 initially
+byte 2      protocol version
 byte 3      flags
 byte 4..7   sequence             # uint32 little-endian
 byte 8..11  sample_rate_hz       # uint32 little-endian
@@ -89,10 +109,6 @@ byte 16..   sample payload
 
 Header size: 16 bytes.
 
-At a 4096-byte payload, protocol overhead is under 0.4% before bus-level transaction overhead.
-
-### Flags
-
 Initial flags:
 
 ```text
@@ -101,100 +117,68 @@ bit 1  RF/sample source discontinuity
 bit 2  sample levels calibrated/normalized
 bit 3  test-pattern source instead of RF
 bit 4  C5 reports RF source present
-bit 5  reserved
-bit 6  reserved
-bit 7  reserved
+bit 5..7 reserved
 ```
 
-The S3 must treat a sequence gap or discontinuity flag as a decoder resynchronization event. It must never silently splice unrelated sample time together.
+A sequence gap or discontinuity flag forces the S3 video decoder to reacquire sync.
+
+## Control-input sideband
+
+Because the exact S3 board has almost no ADC pin budget left, the preferred prototype samples the four gimbal axes on the C5. Those values need only hundreds of updates per second, so they can be carried with negligible overhead.
+
+A later protocol revision may add a small control snapshot after the fixed video header or in a periodic status block:
+
+```text
+4 x gimbal ADC values
+switch bitfield
+input sequence/timestamp
+```
+
+The S3/RivetTX side remains authoritative for calibration, mixing, arming logic, failsafe state and CRSF output.
 
 ## Buffering
 
 ### C5
 
-Use at least ping-pong output buffers:
-
-```text
-RF/DSP fills A  ----+
-                    +--> SPI slave DMA queues A
-RF/DSP fills B  ----+
-                    +--> SPI slave DMA queues B
-```
-
-A deeper ring may be required once real continuous RF production exists, but buffering should not become a way to hide an unsustainable producer/transport mismatch.
+Use at least ping-pong output buffers and prequeue the next SPI-slave DMA transaction.
 
 ### S3
 
-The receive path should be DMA-backed and feed a bounded software ring:
-
-```text
-QSPI DMA
-   |
-   v
-RX block queue
-   |
-   +--> validate header / sequence
-   |
-   +--> stream samples into sync/line decoder
-```
-
-The video decoder should consume bytes incrementally. It should not copy every block into another full-frame staging area.
+Use DMA-backed receives feeding a bounded decoder ring. The decoder consumes samples incrementally; it should not copy every transport block into a second full-frame staging buffer.
 
 ## Backpressure policy
 
-Live analog video cannot be paused at the antenna. If S3 falls behind, preserving old samples is usually worse than dropping data and reacquiring sync.
+Live analog video cannot pause. If the S3 falls behind, dropping a bounded block and reacquiring sync is preferable to increasing latency forever.
 
-Therefore:
-
-- C5 increments an overrun/discontinuity counter when it must drop source data.
-- S3 discards malformed/late blocks rather than building an unbounded queue.
-- sequence gaps reset the PAL/NTSC timing state as needed.
-- diagnostics expose the event visibly during development.
-
-## Control/status transactions
-
-Low-rate commands may use short bus transactions between video reads. Examples:
-
-S3 -> C5:
-
-- select channel/frequency
-- start/stop producer
-- choose sample-rate mode
-- select RF vs generated test pattern
-- request statistics reset
-
-C5 -> S3 status:
-
-- current center frequency
-- sample-rate actual/estimated
-- producer overrun count
-- transport block count
-- RF/sample-source state
-- C5 build/protocol version
-
-Frequency control should not be mixed into the time-critical sample payload itself.
+- C5 counts producer drops/overruns.
+- S3 discards malformed or late blocks.
+- sequence gaps reset video timing state when necessary.
+- diagnostics expose every discontinuity during development.
 
 ## Bring-up ladder
 
-Do not begin with live RF.
+1. Counter pattern.
+2. PRBS/test pattern.
+3. Generated composite sync/bars.
+4. Recorded CVBS replay.
+5. Host-generated C5VRX WBFM output.
+6. Live C5 RF output.
 
-1. **Counter pattern** — C5 emits incrementing bytes. Proves bit ordering and sustained transport.
-2. **PRBS/test pattern** — detects corruption that a simple counter can miss.
-3. **Generated composite** — C5 emits synthetic sync bars/gray ramp at the exact sample rate.
-4. **Recorded CVBS replay** — validates S3 decoder behavior on realistic timing/noise.
-5. **C5VRX host-generated WBFM output** — verifies sample level conventions.
-6. **Live C5 RF output** — only after continuous RF production exists.
+For the exact Waveshare board, repeat steps 1 and 2 while increasing SPI clock because this is also the pin-reuse/signal-integrity qualification.
 
 ## Acceptance targets
 
-Before calling the transport usable for OpenPocket:
+Before calling the link usable:
 
-- sustained run >= 10 minutes without DMA deadlock
-- zero unexplained byte corruption in generated-pattern mode
-- measured payload rate above configured CVBS rate with >= 15% margin
-- bounded queue depth
-- explicit counter for every dropped block
-- control/RivetTX deadlines remain healthy while video is saturated
-- S3 cleanly reacquires video after forced C5 reset or sequence discontinuity
+- >= 10 minutes sustained operation without DMA deadlock
+- zero unexplained byte corruption in PRBS mode
+- payload throughput >= configured video rate with at least 15% measured margin
+- RGB LCD remains stable while GPIO1/2 are reused
+- no false ST7701 commands with LCD CS held high
+- no contention from the disabled touch controller on GPIO16
+- USB-C disconnected during runtime transport
+- bounded decoder queue and explicit drop counters
+- RivetTX control/CRSF deadlines remain healthy under maximum video load
+- clean decoder reacquisition after forced C5 reset/discontinuity
 
-If 13.5 MS/s cannot meet those conditions, reduce the CVBS sample rate or evaluate the C5 SDIO-slave route rather than relying on fragile timing.
+If 13.5 MS/s cannot meet these conditions, reduce/pack the CVBS stream or redesign the final carrier rather than pretending the exact development board has unlimited GPIO margin.
