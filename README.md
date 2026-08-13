@@ -1,6 +1,6 @@
 <div align="center">
 
-# C5VRX-OpenPocket
+<img src="c5vrx-openpocket-logo.jpg" alt="C5VRX-OpenPocket logo" width="760" />
 
 **Two-ESP32 digital analog-FPV handheld experiment**
 
