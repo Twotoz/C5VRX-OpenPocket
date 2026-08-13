@@ -8,7 +8,7 @@ static const char *TAG = "c5op-s3";
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "C5VRX-OpenPocket ESP32-S3 scaffold");
+    ESP_LOGI(TAG, "C5VRX-OpenPocket ESP32-S3 bring-up harness");
     ESP_LOGI(TAG, "board target: %s", C5OP_BOARD_NAME);
     ESP_LOGI(TAG, "expecting protocol v%u with %u-byte headers",
              (unsigned)C5OP_VIDEO_PROTOCOL_VERSION,
@@ -24,7 +24,9 @@ void app_main(void)
              C5OP_CRSF_TX_GPIO,
              C5OP_CRSF_RX_GPIO);
     ESP_LOGW(TAG,
+             "This application is a board/video/transport test harness only; the target OpenPocket radio firmware is RivetTX on ESP32-S3.");
+    ESP_LOGW(TAG,
              "LCD init must happen before GPIO1/2 are reused; touch must be held reset and native USB disconnected before QSPI starts.");
     ESP_LOGW(TAG,
-             "LCD, QSPI RX, CVBS decode and RivetTX integration are intentionally not enabled in this scaffold yet.");
+             "LCD, QSPI RX and CVBS decode are intentionally isolated here until they can be integrated into RivetTX as non-blocking hardware services.");
 }
