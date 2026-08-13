@@ -1,0 +1,22 @@
+# ESP-IDF build output
+build/
+firmware/c5/build/
+firmware/s3/build/
+
+# Generated SDK configuration
+sdkconfig
+sdkconfig.old
+firmware/c5/sdkconfig
+firmware/c5/sdkconfig.old
+firmware/s3/sdkconfig
+firmware/s3/sdkconfig.old
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.pyc
