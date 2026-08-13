@@ -4,12 +4,12 @@
 
 **Two-ESP32 digital analog-FPV handheld experiment**
 
-An OpenPocket-focused integration of **C5VRX** and **RivetTX**: use an ESP32-C5 as the experimental 5.8 GHz analog FPV receiver/demodulator and an ESP32-S3 as the display, radio-control and UI processor.
+An OpenPocket-focused integration of **C5VRX** and **RivetTX**: use an ESP32-C5 as the experimental 5.8 GHz analog FPV receiver/demodulator and the **exact Waveshare ESP32-S3-LCD-Driver-Board with its 40-pin RGB connector** as the display, radio-control and UI processor.
 
 ![status](https://img.shields.io/badge/status-architecture%20%2F%20bring--up-blue)
 ![RF](https://img.shields.io/badge/video-5.8%20GHz%20analog-orange)
 ![C5](https://img.shields.io/badge/RF-ESP32--C5-6f42c1)
-![S3](https://img.shields.io/badge/UI-ESP32--S3-00b894)
+![S3](https://img.shields.io/badge/UI-Waveshare%20ESP32--S3%2040PIN-00b894)
 ![display](https://img.shields.io/badge/display-RGB%20LCD-111111)
 
 </div>
@@ -22,9 +22,9 @@ An OpenPocket-focused integration of **C5VRX** and **RivetTX**: use an ESP32-C5 
 
 This repository asks the next question:
 
-> **If C5VRX can continuously recover composite video, can an ESP32-S3 turn that stream into a complete OpenPocket transmitter with a digital LCD, RivetTX controls and a converted ExpressLRS receiver used as the TX module?**
+> **If C5VRX can continuously recover composite video, can the exact Waveshare ESP32-S3-LCD-Driver-Board shown in the prototype listing turn that stream into a complete OpenPocket transmitter using its onboard 40-pin RGB LCD connector, battery charger, RivetTX and a converted ExpressLRS receiver used as the TX module?**
 
-The target is intentionally tiny in hardware count.
+The target hardware is intentionally tiny:
 
 ```text
                  5.8 GHz analog FPV
@@ -35,23 +35,25 @@ The target is intentionally tiny in hardware count.
                  | RF / I,Q      |
                  | WBFM demod    |
                  | CVBS samples  |
+                 | gimbal ADC    |
                  +-------+-------+
                          |
-                  digital video link
-                    QSPI / GDMA
+                   QSPI / GDMA
                          |
                          v
-                 +---------------+
-  gimbals ------>|               |------> RGB LCD
-  switches ----->|   ESP32-S3    |
-  battery ------>|               |------> buzzer / UI
-                 | CVBS decode   |
-                 | RivetTX       |
-                 +-------+-------+
-                         |
-                    CRSF UART
-                         |
-                         v
+          +--------------------------------+
+          | Waveshare ESP32-S3-LCD-Driver |
+          | Board, N8R8, 40-pin RGB        |
+          |                                |
+          | PAL/NTSC decode                |
+          | RGB framebuffer / LCD          |
+          | RivetTX                        |
+          | ETA6096 1S charge/power        |
+          +----------+---------------------+
+                     |
+                GPIO43/44 CRSF
+                     |
+                     v
               +---------------------+
               | ELRS RX flashed TX  |
               | e.g. 100 mW PA      |
@@ -62,17 +64,34 @@ The target is intentionally tiny in hardware count.
                       aircraft
 ```
 
-The **C5 and S3 are the two main processors**. The converted ELRS receiver is treated as a small external RF module, not as the handset's main controller.
+The **C5 and S3 are the two main processors**. The converted ELRS receiver is a small external RF module.
+
+---
+
+## Exact S3 board target
+
+This repo does **not** target a generic S3 LCD board.
+
+Target: **Waveshare ESP32-S3-LCD-Driver-Board (SKU 27686)** with:
+
+- ESP32-S3-WROOM-1-N8R8
+- 8 MB PSRAM
+- 8 MB flash
+- onboard USB-C
+- ETA6096 1-cell lithium charge/discharge manager
+- MX1.25 battery connector
+- TCA9554 GPIO expander
+- onboard **40-pin 3SPI + RGB connector**
+
+Waveshare's official RGB examples currently use 480x480 ST7701 panels. A different 800x480/480x800 panel is possible only if its electrical pinout and timings match the 40-pin interface or an adapter is used.
+
+See [`docs/waveshare-40pin-target.md`](docs/waveshare-40pin-target.md) for the exact schematic pin map.
 
 ---
 
 ## Why split C5 and S3?
 
-The two chips have very different jobs.
-
-### ESP32-C5 — RF/video front end
-
-The C5 side stays close to the original C5VRX architecture:
+### ESP32-C5 — RF/video front end + input sampler
 
 ```text
 5.8 GHz RF
@@ -82,60 +101,84 @@ The C5 side stays close to the original C5VRX architecture:
    -> sampled composite video
 ```
 
-The C5 should **not** spend its remaining compute on a framebuffer, menu system or RGB LCD.
+The exact Waveshare S3 board spends most of its native GPIO on RGB. To avoid adding another ADC MCU, the prototype also plans to sample the four analog gimbal axes on the C5 and send the latest input snapshot beside the video stream.
 
-### ESP32-S3 — OpenPocket main processor
+### Waveshare ESP32-S3 — OpenPocket main processor
 
-The S3 receives already-demodulated composite samples and handles the product-level work:
+The S3 receives already-demodulated composite samples and handles:
 
 - PAL/NTSC sync detection
 - active-line extraction
-- luma decode first, color later
-- scaling/cropping into the LCD framebuffer
-- RGB LCD timing/output
-- RivetTX control loop
-- gimbal and switch inputs
-- CRSF UART to an ELRS RX-as-TX module
+- luma first, color later
+- scaling/cropping into the framebuffer
+- 40-pin RGB LCD timing/output
+- RivetTX control/mixing/safety
+- CRSF on GPIO43/44 to the ELRS RX-as-TX module
 - telemetry and warnings
 - battery/UI services
 
-A Waveshare-style **ESP32-S3 LCD Driver Board with PSRAM and 1S battery charging** is the initial development target because it removes a large amount of support hardware during bring-up.
-
 ---
 
-## Digital video link
+## Exact-board C5 -> S3 video link
 
-The chips do **not** exchange RGB frames. That would waste bandwidth and duplicate work.
-
-The preferred contract is a continuous 8-bit composite sample stream:
+The chips do **not** exchange RGB frames. The preferred contract remains sampled CVBS:
 
 ```text
 C5                         S3
 ---                        ---
 WBFM                       QSPI RX
  |                          |
-filter                      ring buffer
+filter                      DMA ring
  |                          |
 8-bit CVBS  ===============> sync / video decode
                              |
                              RGB framebuffer
                              |
-                             LCD
+                       40-pin RGB LCD
 ```
 
-Initial target:
+The generic idea of "six arbitrary QSPI pins" does not work on this board because the 40-pin LCD consumes most GPIO. The current **candidate runtime mapping** deliberately reuses pins after LCD initialization:
+
+| Signal | S3 GPIO | Note |
+|---|---:|---|
+| QSPI SCLK | 6 | free in 40-pin RGB mode |
+| QSPI CS | 16 | touch INT; touch held reset |
+| QSPI IO0 | 1 | reused LCD init SDA |
+| QSPI IO1 | 2 | reused LCD init SCK |
+| QSPI IO2 | 19 | reused native USB D- |
+| QSPI IO3 | 20 | reused native USB D+ |
+| CRSF TX/RX | 43 / 44 | ELRS module |
+| battery ADC | 4 | onboard divider |
+
+Runtime order:
+
+```text
+boot
+ -> init TCA9554
+ -> hold touch reset
+ -> init ST7701/RGB panel on GPIO1/2/42
+ -> hold LCD CS high
+ -> start RGB engine
+ -> disconnect/avoid native USB
+ -> remap GPIO1/2/6/16/19/20 to QSPI
+ -> start CRSF on GPIO43/44
+```
+
+This is clever but **not yet proven at 40 MHz**. The repo treats signal integrity and LCD/touch isolation as explicit bring-up tests rather than assumptions.
+
+Initial transport target:
 
 | Property | Target |
 |---|---:|
 | sample format | unsigned 8-bit CVBS |
-| sample rate | 10–13.5 MS/s, benchmark first |
+| sample rate | 10 MS/s first, 13.5 MS/s stretch |
 | transport | 4-data-line SPI / QSPI |
 | C5 role | slave / producer |
 | S3 role | master / consumer |
-| buffering | DMA-backed ring / ping-pong buffers |
-| framing | continuous stream + small block header/control channel |
+| buffering | DMA ping-pong/ring |
+| framing | fixed blocks + protocol header |
 
-At 13.5 MS/s the payload is **108 Mbit/s**. A 4-bit 40 MHz link has **160 Mbit/s raw line capacity**, leaving a useful but not enormous implementation margin. The first hardware test therefore benchmarks sustained DMA throughput before locking the final sample rate.
+At 13.5 MS/s the raw payload is 108 Mbit/s; a 4-bit 40 MHz bus is 160 Mbit/s raw. Real sustained margin must be benchmarked on this exact pin reuse.
 
 See [`docs/video-link.md`](docs/video-link.md).
 
@@ -143,99 +186,97 @@ See [`docs/video-link.md`](docs/video-link.md).
 
 ## RivetTX + ExpressLRS
 
-[RivetTX](https://github.com/Twotoz/RivetTX) already supports ESP32-S3 and a full-duplex CRSF link to ExpressLRS firmware running in **TX mode**. A supported ESP8285/ESP32 receiver can be deliberately flashed as an RX-as-TX module and used as the radio module.
+[RivetTX](https://github.com/Twotoz/RivetTX) already supports ESP32-S3 and a full-duplex CRSF link to ExpressLRS firmware running in **TX mode**. A supported ESP8285/ESP32 receiver can be flashed as RX-as-TX and used as the RF module.
+
+On this board:
 
 ```text
-ESP32-S3 / RivetTX       converted ELRS module
-CRSF TX  -----------------> RX
-CRSF RX  <----------------- TX
-GND      ------------------ GND
-supply   ------------------ VCC
+Waveshare S3 GPIO43 / CRSF TX  ---> converted ELRS RX
+Waveshare S3 GPIO44 / CRSF RX  <--- converted ELRS TX
+GND                              --- GND
+regulated supply                 --- VCC
 ```
 
-A receiver with a genuine PA may expose 50 mW, 100 mW or another power level through ExpressLRS. The exact board's firmware target and `hardware.json` remain authoritative; this project must not assume that every receiver can safely produce 100 mW.
+The exact receiver target and its own `hardware.json` define whether 100 mW is actually valid.
 
-**Important:** current RivetTX OpenPocket presentation code targets an analog AT7456E OSD. This fork therefore needs a new **digital RGB-LCD presentation backend** instead of pretending the existing analog OSD backend already drives this screen.
+Current upstream RivetTX OpenPocket presentation code targets analog AT7456E OSD, so this fork needs a new **digital RGB-LCD backend** for the 40-pin panel.
 
 ---
 
 ## What hardware disappears?
 
-If the C5 experiment succeeds, the digital OpenPocket path no longer needs the conventional analog video chain:
+If C5VRX succeeds, this route needs no conventional analog display chain:
 
-- no RX5808 / RTC6715 VRX module
-- no AT7456E / MAX7456 OSD chip
-- no composite LCD controller board
+- no RX5808 / RTC6715 VRX
+- no AT7456E / MAX7456 OSD
+- no composite LCD controller
 - no separate framebuffer IC
 - no separate main radio MCU beyond the S3
-- no separate charger board when using the development S3-LCD board's battery-management hardware
+- no separate charger board for the prototype
 
-The prototype still needs the LCD, controls, battery, antennas, the converted ELRS RF module and normal power/RF support components.
+Prototype hardware becomes roughly:
+
+```text
+ESP32-C5 board
+Waveshare ESP32-S3-LCD-Driver-Board
+40-pin RGB LCD
+ELRS receiver flashed RX-as-TX
+2 gimbals + switches
+1S battery
+2.4 GHz + 5.8 GHz antennas
+```
 
 ---
 
 ## Current status
 
-> **This is experimental. It is not yet a working FPV receiver or flight transmitter.**
+> **Experimental — not yet a working FPV receiver or flight transmitter.**
 
-The architecture after a valid digital CVBS stream is conventional embedded engineering. The make-or-break research item remains upstream in C5VRX:
+The make-or-break research item remains continuous C5 RF sampling. C5VRX has identified a finite vendor complex-I/Q dump path, but continuous wide live I/Q is still unproven.
 
-**Can the ESP32-C5 produce a continuous, sufficiently wide live I/Q stream from a 5.8 GHz analog FPV transmission?**
-
-C5VRX has identified a finite vendor complex-I/Q dump path, but continuous RF sample production is not yet proven. Until that is solved, the S3 side can be developed independently with synthetic and recorded PAL/NTSC composite samples.
-
-### Status matrix
+The exact Waveshare S3 side can be developed independently with generated/recorded PAL/NTSC data.
 
 | Subsystem | Status |
 |---|---|
-| finite C5 complex-I/Q capture path | 🟡 statically identified; hardware validation required |
+| exact Waveshare N8R8 40-pin target | 🟢 locked/documented |
+| exact schematic pin map | 🟢 encoded in firmware header/docs |
+| finite C5 complex-I/Q capture path | 🟡 hardware validation required |
 | continuous C5 I/Q | 🔴 blocker / unproven |
-| C5 WBFM -> sampled CVBS | 🟡 host-modelled architecture |
-| C5 -> S3 digital transport | 🟡 architecture defined; benchmark required |
+| C5 WBFM -> sampled CVBS | 🟡 architecture/model work |
+| exact-board QSPI pin reuse | 🟡 designed; hardware benchmark required |
 | S3 grayscale PAL/NTSC decode | 🟡 implementation target |
 | S3 color decode | ⚪ later milestone |
-| S3 RGB LCD output | 🟢 supported hardware class; board-specific bring-up required |
-| RivetTX on ESP32-S3 | 🟢 existing upstream target |
-| RivetTX digital LCD presentation | 🔴 new backend required |
-| ELRS RX-as-TX over CRSF | 🟢 supported upstream architecture; real-HW validation required |
+| 40-pin RGB LCD output | 🟡 official board support exists; fork driver pending |
+| RivetTX on ESP32-S3 | 🟢 upstream target |
+| RivetTX digital LCD backend | 🔴 new backend required |
+| ELRS RX-as-TX over CRSF | 🟢 upstream architecture; real-HW validation required |
 
 ---
 
 ## Development plan
 
-### Phase 0 — develop both halves independently
+### S3 / exact board
 
-**C5 side**
-1. Validate real 5.8 GHz finite I/Q capture.
-2. Recover a continuous producer/ring path.
-3. Benchmark hardware-assisted WBFM.
-4. Produce stable 8-bit CVBS samples.
+1. Bring up the Waveshare 40-pin ST7701 RGB example in ESP-IDF.
+2. Reimplement only the needed initialization/timing in this firmware.
+3. Prove framebuffer output while RivetTX-style tasks are running.
+4. Hold touch reset and prove GPIO16 is safe to reuse.
+5. Initialize panel, hold GPIO42 CS high, then reuse GPIO1/2 without disturbing display.
+6. Prove GPIO19/20 QSPI use with USB disconnected.
+7. Run PRBS/counter transport from 10 MHz upward toward 40 MHz.
+8. Feed synthetic CVBS and render grayscale.
+9. Add RivetTX digital presentation + CRSF on GPIO43/44.
 
-**S3 side**
-1. Bring up the target RGB LCD.
-2. Feed synthetic/recorded CVBS samples into the decoder.
-3. Lock PAL/NTSC sync and render grayscale.
-4. Add a DMA QSPI receiver.
-5. Add a digital-LCD RivetTX presentation backend.
-6. Run the RivetTX control loop and CRSF simultaneously with video.
+### C5
 
-### Phase 1 — connect the processors
+1. Validate real 5.8 GHz finite I/Q.
+2. Recover continuous sample production.
+3. Benchmark WBFM.
+4. Produce stable sampled CVBS.
+5. Add gimbal ADC snapshot transport.
+6. Connect live C5 output to the exact Waveshare board.
 
-1. Benchmark sustained QSPI/DMA throughput.
-2. Add FIFO level / overrun / underrun counters.
-3. Stream a known generated composite signal from C5 to S3.
-4. Replace it with real C5VRX output.
-5. Measure glass-to-glass latency and frame stability.
-
-### Phase 2 — complete OpenPocket
-
-1. Integrate gimbals and switches.
-2. Connect the converted ELRS RX-as-TX module.
-3. Add telemetry and safety warnings over the digital video UI.
-4. Add color decode if the CPU/DMA budget allows it cleanly.
-5. Characterize battery life, thermals and 2.4/5.8 GHz RF coexistence.
-
-See [`docs/bringup.md`](docs/bringup.md) and [`docs/architecture.md`](docs/architecture.md).
+See [`docs/bringup.md`](docs/bringup.md), [`docs/hardware.md`](docs/hardware.md), and [`docs/waveshare-40pin-target.md`](docs/waveshare-40pin-target.md).
 
 ---
 
@@ -244,27 +285,29 @@ See [`docs/bringup.md`](docs/bringup.md) and [`docs/architecture.md`](docs/archi
 ```text
 C5VRX-OpenPocket/
 ├── firmware/
-│   ├── c5/                 # C5 transport/integration work
-│   └── s3/                 # S3 video/display/RivetTX integration work
+│   ├── c5/
+│   └── s3/
+│       └── main/
+│           └── board_waveshare_s3_lcd_driver.h
+├── protocol/
 ├── docs/
 │   ├── architecture.md
 │   ├── video-link.md
 │   ├── hardware.md
+│   ├── waveshare-40pin-target.md
 │   └── bringup.md
 └── README.md
 ```
 
-This repository intentionally references rather than silently replacing the upstream projects:
+Upstream projects:
 
 - **C5VRX:** <https://github.com/Twotoz/C5VRX>
 - **RivetTX:** <https://github.com/Twotoz/RivetTX>
 
-Research discoveries that are useful to every C5VRX target belong upstream in C5VRX. Product-specific C5↔S3 transport, LCD decoding and OpenPocket integration belong here.
+Research useful to every C5VRX target belongs upstream in C5VRX. Exact Waveshare 40-pin OpenPocket integration belongs here.
 
 ---
 
 ## Safety / validation boundary
 
-Do not fly from a development build simply because the UI appears responsive. A valid OpenPocket transmitter requires measured control-loop deadlines, failsafe behavior, CRSF integrity, RF output verification, video-buffer fault handling, thermal testing and power-supply testing on the real hardware.
-
-Keep propellers removed during bench bring-up and start converted ELRS modules at their lowest useful RF power.
+Do not fly from a development build because the LCD and sticks appear responsive. Real hardware still needs measured control deadlines, failsafe behavior, CRSF integrity, RF verification, video-buffer fault handling, thermals and power testing.
