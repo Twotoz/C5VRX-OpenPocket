@@ -1,0 +1,35 @@
+name: C5VRX-OpenPocket CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  firmware-build:
+    name: ${{ matrix.name }} / ESP-IDF v6.0.2
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ESP32-C5 producer scaffold
+            target: esp32c5
+            path: firmware/c5
+          - name: ESP32-S3 consumer scaffold
+            target: esp32s3
+            path: firmware/s3
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build firmware
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v6.0.2
+          target: ${{ matrix.target }}
+          path: ${{ matrix.path }}
