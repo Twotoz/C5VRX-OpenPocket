@@ -4,7 +4,7 @@
 
 **Two-ESP32 digital analog-FPV handheld experiment**
 
-An OpenPocket-focused integration of **C5VRX** and **RivetTX**: use an ESP32-C5 as the experimental 5.8 GHz analog FPV receiver/demodulator and the **exact Waveshare ESP32-S3-LCD-Driver-Board with its 40-pin RGB connector** as the display, radio-control and UI processor.
+An OpenPocket-focused integration of **C5VRX** and **RivetTX**: use an ESP32-C5 as the experimental 5.8 GHz analog FPV receiver/demodulator and the **exact Waveshare ESP32-S3-LCD-Driver-Board with its 40-pin RGB connector** as the OpenPocket mainboard, running **RivetTX as the transmitter firmware** plus the digital FPV display pipeline.
 
 ![status](https://img.shields.io/badge/status-architecture%20%2F%20bring--up-blue)
 ![RF](https://img.shields.io/badge/video-5.8%20GHz%20analog-orange)
@@ -22,7 +22,7 @@ An OpenPocket-focused integration of **C5VRX** and **RivetTX**: use an ESP32-C5 
 
 This repository asks the next question:
 
-> **If C5VRX can continuously recover composite video, can the exact Waveshare ESP32-S3-LCD-Driver-Board shown in the prototype listing turn that stream into a complete OpenPocket transmitter using its onboard 40-pin RGB LCD connector, battery charger, RivetTX and a converted ExpressLRS receiver used as the TX module?**
+> **If C5VRX can continuously recover composite video, can the exact Waveshare ESP32-S3-LCD-Driver-Board turn that stream into a complete OpenPocket transmitter using its onboard 40-pin RGB LCD connector and battery charger, with RivetTX as the main radio firmware and a converted ExpressLRS receiver used as the TX module?**
 
 The target hardware is intentionally tiny:
 
@@ -35,7 +35,7 @@ The target hardware is intentionally tiny:
                  | RF / I,Q      |
                  | WBFM demod    |
                  | CVBS samples  |
-                 | gimbal ADC    |
+                 | raw gimbal ADC|
                  +-------+-------+
                          |
                    QSPI / GDMA
@@ -45,9 +45,10 @@ The target hardware is intentionally tiny:
           | Waveshare ESP32-S3-LCD-Driver |
           | Board, N8R8, 40-pin RGB        |
           |                                |
+          | RivetTX = main firmware        |
           | PAL/NTSC decode                |
           | RGB framebuffer / LCD          |
-          | RivetTX                        |
+          | control / mixer / safety       |
           | ETA6096 1S charge/power        |
           +----------+---------------------+
                      |
@@ -64,7 +65,7 @@ The target hardware is intentionally tiny:
                       aircraft
 ```
 
-The **C5 and S3 are the two main processors**. The converted ELRS receiver is a small external RF module.
+The **C5 and S3 are the two main processors**. The converted ELRS receiver is a small external RF module. RivetTX remains the radio/control software owner on the S3; this repository supplies the hardware/video integration around it.
 
 ---
 
@@ -91,7 +92,7 @@ See [`docs/waveshare-40pin-target.md`](docs/waveshare-40pin-target.md) for the e
 
 ## Why split C5 and S3?
 
-### ESP32-C5 — RF/video front end + input sampler
+### ESP32-C5 — RF/video front end + raw input acquisition
 
 ```text
 5.8 GHz RF
@@ -101,21 +102,26 @@ See [`docs/waveshare-40pin-target.md`](docs/waveshare-40pin-target.md) for the e
    -> sampled composite video
 ```
 
-The exact Waveshare S3 board spends most of its native GPIO on RGB. To avoid adding another ADC MCU, the prototype also plans to sample the four analog gimbal axes on the C5 and send the latest input snapshot beside the video stream.
+The exact Waveshare S3 board spends most of its native GPIO on RGB. To avoid adding another ADC MCU, the prototype also plans to sample the four analog gimbal axes on the C5 and send timestamped raw snapshots beside the video stream.
+
+The C5 does **not** own radio calibration, mixing or safety. Those raw values enter RivetTX on the S3, which remains responsible for calibration/filtering, stale-input detection, channel generation and failsafe behavior.
 
 ### Waveshare ESP32-S3 — OpenPocket main processor
 
-The S3 receives already-demodulated composite samples and handles:
+The S3 runs **RivetTX as the main firmware** and adds the digital-FPV hardware services needed by this product:
 
+- RivetTX control/mixing/safety
 - PAL/NTSC sync detection
 - active-line extraction
 - luma first, color later
 - scaling/cropping into the framebuffer
 - 40-pin RGB LCD timing/output
-- RivetTX control/mixing/safety
+- C5 raw-input adapter when used
 - CRSF on GPIO43/44 to the ELRS RX-as-TX module
 - telemetry and warnings
 - battery/UI services
+
+The local `firmware/s3` application in this repo is only a **bring-up harness** for the Waveshare board, C5 transport, LCD and decoder. It is not intended to become a second radio firmware.
 
 ---
 
@@ -161,7 +167,7 @@ boot
  -> start RGB engine
  -> disconnect/avoid native USB
  -> remap GPIO1/2/6/16/19/20 to QSPI
- -> start CRSF on GPIO43/44
+ -> start RivetTX services / CRSF on GPIO43/44
 ```
 
 This is clever but **not yet proven at 40 MHz**. The repo treats signal integrity and LCD/touch isolation as explicit bring-up tests rather than assumptions.
@@ -184,11 +190,40 @@ See [`docs/video-link.md`](docs/video-link.md).
 
 ---
 
-## RivetTX + ExpressLRS
+## RivetTX is the OpenPocket firmware
 
-[RivetTX](https://github.com/Twotoz/RivetTX) already supports ESP32-S3 and a full-duplex CRSF link to ExpressLRS firmware running in **TX mode**. A supported ESP8285/ESP32 receiver can be flashed as RX-as-TX and used as the RF module.
+[RivetTX](https://github.com/Twotoz/RivetTX) is the intended **main application on the ESP32-S3**, not merely a library beside another OpenPocket firmware.
 
-On this board:
+RivetTX already supplies the radio side we want to keep centralized:
+
+- deterministic input, mixer and safety path
+- CRSF TX/RX
+- ExpressLRS parameter discovery/control
+- RX-as-TX module support
+- telemetry
+- model logic/storage
+- warnings and UI semantics
+- deadline/stale-input protection
+
+C5VRX-OpenPocket therefore adds product-specific services around RivetTX instead of reimplementing those features:
+
+```text
+                    RivetTX control core
+                       /          \
+                      /            \
+       raw input adapter            CRSF -> ELRS RX-as-TX
+              ^
+              |
+C5 video/input transport
+              |
+              +--> PAL/NTSC decoder --> RGB base image
+                                        + RivetTX UI overlay
+                                        -> 40-pin LCD
+```
+
+Current RivetTX OpenPocket presentation uses an analog AT7456E-compatible OSD. This project needs a new **digital RGB framebuffer presentation backend** so the same RivetTX UI state can be composited directly over the decoded FPV image.
+
+On this board the ExpressLRS module remains:
 
 ```text
 Waveshare S3 GPIO43 / CRSF TX  ---> converted ELRS RX
@@ -199,7 +234,7 @@ regulated supply                 --- VCC
 
 The exact receiver target and its own `hardware.json` define whether 100 mW is actually valid.
 
-Current upstream RivetTX OpenPocket presentation code targets analog AT7456E OSD, so this fork needs a new **digital RGB-LCD backend** for the 40-pin panel.
+See [`docs/rivettx-integration.md`](docs/rivettx-integration.md) for the firmware ownership and integration plan.
 
 ---
 
@@ -234,11 +269,12 @@ ELRS receiver flashed RX-as-TX
 
 The make-or-break research item remains continuous C5 RF sampling. C5VRX has identified a finite vendor complex-I/Q dump path, but continuous wide live I/Q is still unproven.
 
-The exact Waveshare S3 side can be developed independently with generated/recorded PAL/NTSC data.
+The exact Waveshare S3 side can be developed independently with generated/recorded PAL/NTSC data while preserving RivetTX as the final firmware target.
 
 | Subsystem | Status |
 |---|---|
 | exact Waveshare N8R8 40-pin target | 🟢 locked/documented |
+| RivetTX as S3 main firmware | 🟢 architecture decision |
 | exact schematic pin map | 🟢 encoded in firmware header/docs |
 | finite C5 complex-I/Q capture path | 🟡 hardware validation required |
 | continuous C5 I/Q | 🔴 blocker / unproven |
@@ -247,25 +283,28 @@ The exact Waveshare S3 side can be developed independently with generated/record
 | S3 grayscale PAL/NTSC decode | 🟡 implementation target |
 | S3 color decode | ⚪ later milestone |
 | 40-pin RGB LCD output | 🟡 official board support exists; fork driver pending |
-| RivetTX on ESP32-S3 | 🟢 upstream target |
-| RivetTX digital LCD backend | 🔴 new backend required |
+| RivetTX digital RGB backend | 🔴 new backend required |
+| C5 raw-input -> RivetTX adapter | 🔴 new backend required if C5 samples gimbals |
 | ELRS RX-as-TX over CRSF | 🟢 upstream architecture; real-HW validation required |
 
 ---
 
 ## Development plan
 
-### S3 / exact board
+### S3 / exact board + RivetTX
 
-1. Bring up the Waveshare 40-pin ST7701 RGB example in ESP-IDF.
-2. Reimplement only the needed initialization/timing in this firmware.
-3. Prove framebuffer output while RivetTX-style tasks are running.
-4. Hold touch reset and prove GPIO16 is safe to reuse.
-5. Initialize panel, hold GPIO42 CS high, then reuse GPIO1/2 without disturbing display.
-6. Prove GPIO19/20 QSPI use with USB disconnected.
-7. Run PRBS/counter transport from 10 MHz upward toward 40 MHz.
-8. Feed synthetic CVBS and render grayscale.
-9. Add RivetTX digital presentation + CRSF on GPIO43/44.
+1. Build upstream RivetTX for ESP32-S3 unchanged and preserve its control/CRSF behavior.
+2. Bring up the Waveshare 40-pin ST7701 RGB example in the local test harness.
+3. Reimplement only the needed board initialization/timing as reusable components.
+4. Prove framebuffer output while RivetTX-style tasks are running.
+5. Hold touch reset and prove GPIO16 is safe to reuse.
+6. Initialize panel, hold GPIO42 CS high, then reuse GPIO1/2 without disturbing display.
+7. Prove GPIO19/20 transport use with USB disconnected.
+8. Run PRBS/counter transport from 10 MHz upward toward 40 MHz.
+9. Feed synthetic CVBS and render grayscale.
+10. Add a generic RivetTX digital RGB presentation backend and compose UI over video.
+11. Add the C5 raw-input adapter if the C5 acquires gimbals.
+12. Stress saturated video while checking RivetTX control deadlines and CRSF.
 
 ### C5
 
@@ -273,10 +312,10 @@ The exact Waveshare S3 side can be developed independently with generated/record
 2. Recover continuous sample production.
 3. Benchmark WBFM.
 4. Produce stable sampled CVBS.
-5. Add gimbal ADC snapshot transport.
-6. Connect live C5 output to the exact Waveshare board.
+5. Add timestamped raw gimbal snapshots if required by the final pin budget.
+6. Connect live C5 output to the exact Waveshare/RivetTX target.
 
-See [`docs/bringup.md`](docs/bringup.md), [`docs/hardware.md`](docs/hardware.md), and [`docs/waveshare-40pin-target.md`](docs/waveshare-40pin-target.md).
+See [`docs/bringup.md`](docs/bringup.md), [`docs/hardware.md`](docs/hardware.md), [`docs/rivettx-integration.md`](docs/rivettx-integration.md), and [`docs/waveshare-40pin-target.md`](docs/waveshare-40pin-target.md).
 
 ---
 
@@ -286,7 +325,7 @@ See [`docs/bringup.md`](docs/bringup.md), [`docs/hardware.md`](docs/hardware.md)
 C5VRX-OpenPocket/
 ├── firmware/
 │   ├── c5/
-│   └── s3/
+│   └── s3/                 # bring-up harness, not a second radio firmware
 │       └── main/
 │           └── board_waveshare_s3_lcd_driver.h
 ├── protocol/
@@ -294,6 +333,7 @@ C5VRX-OpenPocket/
 │   ├── architecture.md
 │   ├── video-link.md
 │   ├── hardware.md
+│   ├── rivettx-integration.md
 │   ├── waveshare-40pin-target.md
 │   └── bringup.md
 └── README.md
@@ -304,7 +344,7 @@ Upstream projects:
 - **C5VRX:** <https://github.com/Twotoz/C5VRX>
 - **RivetTX:** <https://github.com/Twotoz/RivetTX>
 
-Research useful to every C5VRX target belongs upstream in C5VRX. Exact Waveshare 40-pin OpenPocket integration belongs here.
+Research useful to every C5VRX target belongs upstream in C5VRX. Generic transmitter/control improvements belong in RivetTX. Exact Waveshare 40-pin + C5 digital-video integration belongs here.
 
 ---
 
